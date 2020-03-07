@@ -4,6 +4,7 @@ import elbv2 = require('@aws-cdk/aws-elasticloadbalancingv2');
 import as = require('@aws-cdk/aws-appstream');
 
 import { truncate } from "fs";
+import { CfnRoute } from '@aws-cdk/aws-ec2';
 
 const vpcenv = process.env.vpcenv === undefined ? "test" : process.env.vpcenv;
 const corp =
@@ -56,6 +57,50 @@ export class CdkMultiVpcStack extends cdk.Stack {
         mapPublicIpOnLaunch: false
       }
     );
+
+    //// ADDED. TEST 01. NGW added in VPC Appstream
+    /*
+    const igwappstream = new ec2.CfnInternetGateway(this, "igwappstream");
+    const igwattachmentappstream = new ec2.CfnVPCGatewayAttachment(
+      this,
+      "igwattachmentappstream",
+      {
+        internetGatewayId: igwappstream.ref,
+        vpcId: vpcAppstream.vpcId
+      }
+    );
+
+    const appStreamPublicSubnetA = new ec2.PublicSubnet(
+      this,
+      "appStreamPublicSubnetA",
+      {
+        availabilityZone: "ap-northeast-2a",
+        cidrBlock: "172.24.90.0/24",
+        vpcId: vpcAppstream.vpcId,
+        mapPublicIpOnLaunch: false
+      }
+    );
+
+    const appStreamPublicSubnetC = new ec2.PublicSubnet(
+      this,
+      "appStreamPublicSubnetC",
+      {
+        availabilityZone: "ap-northeast-2c",
+        cidrBlock: "172.24.91.0/24",
+        vpcId: vpcAppstream.vpcId,
+        mapPublicIpOnLaunch: false
+      }
+    );
+    appStreamPublicSubnetA.addDefaultInternetRoute(igwappstream.ref,
+      igwattachmentappstream);
+    appStreamPublicSubnetC.addDefaultInternetRoute(igwappstream.ref, 
+      igwattachmentappstream);
+
+    const ngwAppstream = appStreamPublicSubnetA.addNatGateway();
+    appStreamPrivateSubnetA.addDefaultNatRoute(ngwAppstream.ref);
+    appStreamPrivateSubnetC.addDefaultNatRoute(ngwAppstream.ref);
+    */
+    /// MODIFIED END..
 
     const vpcSquid = new ec2.Vpc(this, `${elemPrefix}-vpc-squid`, {
       cidr: "10.254.0.0/16",
@@ -324,6 +369,7 @@ export class CdkMultiVpcStack extends cdk.Stack {
       destinationCidrBlock: "0.0.0.0/0",
       enablesInternetConnectivity: true
     });
+
     // Transit Gateway
     const tgw = new ec2.CfnTransitGateway(this, `${elemPrefix}-tgw-squid-appstream`, {
 
@@ -355,7 +401,43 @@ export class CdkMultiVpcStack extends cdk.Stack {
       {
         transitGatewayId: tgw.ref
       }
-    )
+    );
+
+    const tgwRtAssochAppStream = new ec2.CfnTransitGatewayRouteTableAssociation(
+      this,
+      `${elemPrefix}-tgwrtassocappstream`,
+      {
+        transitGatewayAttachmentId: tgwAttAppstream.ref,
+        transitGatewayRouteTableId: tgwRtInterVpc.ref
+      }
+    );
+
+    const tgwRtAssochSquid = new ec2.CfnTransitGatewayRouteTableAssociation(
+      this,
+      `${elemPrefix}-tgwrsquid`,
+      {
+        transitGatewayAttachmentId: tgwAttSquid.ref,
+        transitGatewayRouteTableId: tgwRtInterVpc.ref
+      }
+    );
+
+    const tgwPgAppstream = new ec2.CfnTransitGatewayRouteTablePropagation(
+      this,
+      `${elemPrefix}-tgwPgAppStream`,
+      {
+        transitGatewayAttachmentId: tgwAttAppstream.ref,
+        transitGatewayRouteTableId: tgwRtInterVpc.ref
+      }
+    );
+
+    const tgwPgSquid = new ec2.CfnTransitGatewayRouteTablePropagation(
+      this,
+      `${elemPrefix}-tgwPgSquid`,
+      {
+        transitGatewayAttachmentId: tgwAttSquid.ref,
+        transitGatewayRouteTableId: tgwRtInterVpc.ref
+      }
+    );
 
     const tgwRrAppstream = new ec2.CfnTransitGatewayRoute(
       this,
@@ -366,18 +448,38 @@ export class CdkMultiVpcStack extends cdk.Stack {
         destinationCidrBlock: vpcAppstream.vpcCidrBlock,
         transitGatewayAttachmentId: tgwAttAppstream.ref
       }
-    )
+    );
 
     const tgwRrSquid = new ec2.CfnTransitGatewayRoute(
       this,
       `${elemPrefix}-tgwrr-intervpc-squid`,
       {
-        transitGatewayRouteTableId : tgwRtInterVpc.ref,
+        transitGatewayRouteTableId: tgwRtInterVpc.ref,
         blackhole: false,
         destinationCidrBlock: vpcSquid.vpcCidrBlock,
         transitGatewayAttachmentId: tgwAttSquid.ref
       }
-    )
+    );
+    
+    const tgwRRinPrivateSubnetA = new ec2.CfnRoute(
+      this, 
+      `${elemPrefix}-streamsubnetarr`,
+      {
+        routeTableId:appStreamPrivateSubnetA.routeTable.routeTableId,
+        destinationCidrBlock: "0.0.0.0/0",
+        transitGatewayId: tgw.ref
+      }
+    );
+
+    const tgwRRinPrivateSubnetC = new ec2.CfnRoute(
+      this,
+      `${elemPrefix}-streamsubnetcrr`,
+      {
+        routeTableId: appStreamPrivateSubnetC.routeTable.routeTableId,
+        destinationCidrBlock: "0.0.0.0/0",
+        transitGatewayId: tgw.ref
+      }
+    );
 
     // appstream configuration
     // CfnStack.AccessEndpointProperty.EndpointType : STREAMING
@@ -392,6 +494,7 @@ export class CdkMultiVpcStack extends cdk.Stack {
         enabled: false,
         settingsGroup: ""
       },
+      name: `${elemPrefix}-asstack`,
       description: "AppStream Test Stack",
       displayName: "AppStreamTestStack",
       redirectUrl: "https://console.aws.amazon.com"
@@ -418,7 +521,7 @@ export class CdkMultiVpcStack extends cdk.Stack {
 
     const appstreamfleet = new as.CfnFleet(this, `${elemPrefix}-asfleet`, {
       computeCapacity: {
-        desiredInstances: 1
+        desiredInstances: 3,
       },
       description: "Compute Resource for Appstream 2.0",
       fleetType: "ON_DEMAND",
@@ -432,6 +535,11 @@ export class CdkMultiVpcStack extends cdk.Stack {
         ],
         securityGroupIds: [ashttpshttpsg.securityGroupId]
       }
+    });
+
+    const stackAttach = new as.CfnStackFleetAssociation(this, `${elemPrefix}-asfleetassoc`, {
+      fleetName: appstreamfleet.ref,
+      stackName: appstreamstack.ref
     });
 
   }
