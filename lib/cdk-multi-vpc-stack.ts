@@ -58,8 +58,8 @@ export class CdkMultiVpcStack extends cdk.Stack {
       }
     );
 
-    //// ADDED. TEST 01. NGW added in VPC Appstream
-    /*
+    // ADDED. TEST CASE 01. Internet Enabled in the AppStream VPC.
+
     const igwappstream = new ec2.CfnInternetGateway(this, "igwappstream");
     const igwattachmentappstream = new ec2.CfnVPCGatewayAttachment(
       this,
@@ -91,15 +91,14 @@ export class CdkMultiVpcStack extends cdk.Stack {
         mapPublicIpOnLaunch: false
       }
     );
+
     appStreamPublicSubnetA.addDefaultInternetRoute(igwappstream.ref,
       igwattachmentappstream);
     appStreamPublicSubnetC.addDefaultInternetRoute(igwappstream.ref, 
       igwattachmentappstream);
 
     const ngwAppstream = appStreamPublicSubnetA.addNatGateway();
-    appStreamPrivateSubnetA.addDefaultNatRoute(ngwAppstream.ref);
-    appStreamPrivateSubnetC.addDefaultNatRoute(ngwAppstream.ref);
-    */
+
     /// MODIFIED END..
 
     const vpcSquid = new ec2.Vpc(this, `${elemPrefix}-vpc-squid`, {
