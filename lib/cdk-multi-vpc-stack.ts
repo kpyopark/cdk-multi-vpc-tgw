@@ -24,8 +24,16 @@ export class CdkMultiVpcStack extends cdk.Stack {
     // At that time, you can use below command in bash shell './node_modules'
     // find . -name 'node_modules' -type d -prune -print -exec rm -rf '{}' \;
     // The code that defines your stack goes here
+
+    const vpcAppStreamCidr = "172.24.0.0/16";
+    const vpcAppStreamPrivateSubnetCidr = ["172.24.80.0/24", "172.24.81.0/24"];
+    const vpcSquidCidr = "10.254.0.0/16";
+    const vpcSquidPrivateSubnetCidr = ["10.254.80.0/24", "10.254.80.0/24"];
+    const vpcSquidPublicSubnetCidr = ["10.254.0.0/24", "10.254.1.0/24"];
+    const SquidInstPrivateIp = "10.254.0.157"
+    
     const vpcAppstream = new ec2.Vpc(this, `${elemPrefix}-vpc-appstream`, {
-      cidr: "172.24.0.0/16",
+      cidr: vpcAppStreamCidr,
       enableDnsHostnames: true,
       enableDnsSupport: true,
       maxAzs: 3,
@@ -58,49 +66,6 @@ export class CdkMultiVpcStack extends cdk.Stack {
       }
     );
 
-    // ADDED. TEST CASE 01. Internet Enabled in the AppStream VPC.
-
-    const igwappstream = new ec2.CfnInternetGateway(this, "igwappstream");
-    const igwattachmentappstream = new ec2.CfnVPCGatewayAttachment(
-      this,
-      "igwattachmentappstream",
-      {
-        internetGatewayId: igwappstream.ref,
-        vpcId: vpcAppstream.vpcId
-      }
-    );
-
-    const appStreamPublicSubnetA = new ec2.PublicSubnet(
-      this,
-      "appStreamPublicSubnetA",
-      {
-        availabilityZone: "ap-northeast-2a",
-        cidrBlock: "172.24.90.0/24",
-        vpcId: vpcAppstream.vpcId,
-        mapPublicIpOnLaunch: false
-      }
-    );
-
-    const appStreamPublicSubnetC = new ec2.PublicSubnet(
-      this,
-      "appStreamPublicSubnetC",
-      {
-        availabilityZone: "ap-northeast-2c",
-        cidrBlock: "172.24.91.0/24",
-        vpcId: vpcAppstream.vpcId,
-        mapPublicIpOnLaunch: false
-      }
-    );
-
-    appStreamPublicSubnetA.addDefaultInternetRoute(igwappstream.ref,
-      igwattachmentappstream);
-    appStreamPublicSubnetC.addDefaultInternetRoute(igwappstream.ref, 
-      igwattachmentappstream);
-
-    const ngwAppstream = appStreamPublicSubnetA.addNatGateway();
-
-    /// MODIFIED END..
-
     const vpcSquid = new ec2.Vpc(this, `${elemPrefix}-vpc-squid`, {
       cidr: "10.254.0.0/16",
       enableDnsHostnames: true,
@@ -113,7 +78,7 @@ export class CdkMultiVpcStack extends cdk.Stack {
     });
 
     // Subnets
-    const vpcSquidPublicSubnetA = new ec2.PrivateSubnet(
+    const vpcSquidPublicSubnetA = new ec2.PublicSubnet(
       this,
       "vpcSquidPublicSubnetA",
       {
@@ -124,7 +89,7 @@ export class CdkMultiVpcStack extends cdk.Stack {
       }
     );
 
-    const vpcSquidPublicSubnetC = new ec2.PrivateSubnet(
+    const vpcSquidPublicSubnetC = new ec2.PublicSubnet(
       this,
       "vpcSquidPublicSubnetC",
       {
@@ -217,7 +182,7 @@ export class CdkMultiVpcStack extends cdk.Stack {
       }
     );
 
-    // NAT Gateway via Squid Proxy
+    // Forward Proxy using Squid Proxy
     const amznImage = ec2.MachineImage.latestAmazonLinux({
       generation: ec2.AmazonLinuxGeneration.AMAZON_LINUX_2,
       edition: ec2.AmazonLinuxEdition.STANDARD,
@@ -262,6 +227,18 @@ export class CdkMultiVpcStack extends cdk.Stack {
       "allow appstream https"
     );
 
+    httpsg.addIngressRule(
+      ec2.Peer.ipv4("172.24.0.0/16"),
+      ec2.Port.tcp(3128),
+      "allow appstream https"
+    );
+
+    httpsg.addIngressRule(
+      ec2.Peer.ipv4("10.254.0.0/16"),
+      ec2.Port.tcp(3128),
+      "allow appstream https"
+    );
+
     const userdata = ec2.UserData.forLinux({
       shebang: `#!/bin/bash -ex
       exec > >(tee /var/log/user-data.log|logger -t user-data -s 2>/dev/console) 2>&1
@@ -273,9 +250,10 @@ export class CdkMultiVpcStack extends cdk.Stack {
       sudo usermod -a -G docker ec2-user
       sudo chkconfig docker on
       sudo service docker start
-      docker pull sameersbn/squid:3.5.27-2
-      docker run --name squid -d --restart=always \\
-        --publish 3128:3128 \\
+      sudo docker pull sameersbn/squid:3.5.27-2
+      # Docker process tends to bind ipv6 interface. It can make troubles. So we should use specific IPV4 address within docker publish port parameter like below.
+      sudo docker run --name squid -d --restart=always \\
+        --publish \`curl http://169.254.169.254/latest/meta-data/local-ipv4\`:3128:3128 \\
         --volume /srv/docker/squid/cache:/var/spool/squid \\
         sameersbn/squid:3.5.27-2
       echo END_USERSCRIPT
@@ -297,7 +275,7 @@ export class CdkMultiVpcStack extends cdk.Stack {
       vpcSubnets: {
         subnets: [vpcSquidPublicSubnetA]
       },
-      sourceDestCheck: false
+      sourceDestCheck: false,
     });
 
     const window2016Image = ec2.MachineImage.latestWindows(
@@ -332,8 +310,24 @@ export class CdkMultiVpcStack extends cdk.Stack {
       vpcSubnets: {
         subnets: [vpcSquidPublicSubnetC]
       }
-      //,sourceDestCheck: false
     });
+
+    const squidInstip = new ec2.CfnEIP(
+      this,
+      `${elemPrefix}-vpcsquid-squidInstip`,
+      {
+        domain: 'vpc'
+      }
+    )
+
+    const squidInstipaasoc = new ec2.CfnEIPAssociation(
+      this,
+      `${elemPrefix}-squidInstipaasoc`,
+      {
+        allocationId: squidInstip.attrAllocationId,
+        instanceId: squidInst.instanceId
+      }
+    )
 
     const testwindoweip = new ec2.CfnEIP(
       this, 
@@ -383,6 +377,7 @@ export class CdkMultiVpcStack extends cdk.Stack {
         vpcId: vpcAppstream.vpcId
       }
     );
+    tgwAttAppstream.addDependsOn(tgw);
 
     const tgwAttSquid = new ec2.CfnTransitGatewayAttachment(
       this,
@@ -393,6 +388,7 @@ export class CdkMultiVpcStack extends cdk.Stack {
         vpcId: vpcSquid.vpcId
       }
     );
+    tgwAttSquid.addDependsOn(tgw);
 
     const tgwRtInterVpc = new ec2.CfnTransitGatewayRouteTable(
       this,
@@ -401,6 +397,8 @@ export class CdkMultiVpcStack extends cdk.Stack {
         transitGatewayId: tgw.ref
       }
     );
+   
+    tgwRtInterVpc.addDependsOn(tgw);
 
     const tgwRtAssochAppStream = new ec2.CfnTransitGatewayRouteTableAssociation(
       this,
@@ -410,6 +408,8 @@ export class CdkMultiVpcStack extends cdk.Stack {
         transitGatewayRouteTableId: tgwRtInterVpc.ref
       }
     );
+    tgwRtAssochAppStream.addDependsOn(tgwAttAppstream);
+    // tgwRtAssochAppStream.addDependsOn(tgwRtInterVpc);
 
     const tgwRtAssochSquid = new ec2.CfnTransitGatewayRouteTableAssociation(
       this,
@@ -419,6 +419,8 @@ export class CdkMultiVpcStack extends cdk.Stack {
         transitGatewayRouteTableId: tgwRtInterVpc.ref
       }
     );
+    tgwRtAssochSquid.addDependsOn(tgw);
+    // tgwRtAssochSquid.addDependsOn(tgwRtInterVpc);
 
     const tgwPgAppstream = new ec2.CfnTransitGatewayRouteTablePropagation(
       this,
@@ -428,6 +430,8 @@ export class CdkMultiVpcStack extends cdk.Stack {
         transitGatewayRouteTableId: tgwRtInterVpc.ref
       }
     );
+    tgwPgAppstream.addDependsOn(tgwAttAppstream);
+    // tgwPgAppstream.addDependsOn(tgwRtInterVpc);
 
     const tgwPgSquid = new ec2.CfnTransitGatewayRouteTablePropagation(
       this,
@@ -437,17 +441,21 @@ export class CdkMultiVpcStack extends cdk.Stack {
         transitGatewayRouteTableId: tgwRtInterVpc.ref
       }
     );
+    tgwPgSquid.addDependsOn(tgwAttSquid);
+    //tgwPgSquid.addDependsOn(tgwRtInterVpc);
 
     const tgwRrAppstream = new ec2.CfnTransitGatewayRoute(
       this,
       `${elemPrefix}-tgwrr-intervpc-appstream`,
       {
-        transitGatewayRouteTableId : tgwRtInterVpc.ref,
+        transitGatewayRouteTableId: tgwRtInterVpc.ref,
         blackhole: false,
         destinationCidrBlock: vpcAppstream.vpcCidrBlock,
         transitGatewayAttachmentId: tgwAttAppstream.ref
       }
     );
+    //tgwRrAppstream.addDependsOn(tgwRtInterVpc);
+    tgwRrAppstream.addDependsOn(tgwAttAppstream);
 
     const tgwRrSquid = new ec2.CfnTransitGatewayRoute(
       this,
@@ -459,7 +467,22 @@ export class CdkMultiVpcStack extends cdk.Stack {
         transitGatewayAttachmentId: tgwAttSquid.ref
       }
     );
-    
+    // tgwRrSquid.addDependsOn(tgwRtInterVpc);
+    tgwRrSquid.addDependsOn(tgwAttSquid);
+
+    const tgwRrIgw = new ec2.CfnTransitGatewayRoute(
+      this,
+      `${elemPrefix}-tgwrr-intervpc-igw`,
+      {
+        transitGatewayRouteTableId: tgwRtInterVpc.ref,
+        blackhole: false,
+        destinationCidrBlock: "0.0.0.0/0",
+        transitGatewayAttachmentId: tgwAttSquid.ref
+      }
+    );
+    // tgwRrIgw.addDependsOn(tgwRtInterVpc);
+    tgwRrIgw.addDependsOn(tgwAttSquid);
+
     const tgwRRinPrivateSubnetA = new ec2.CfnRoute(
       this, 
       `${elemPrefix}-streamsubnetarr`,
@@ -469,16 +492,73 @@ export class CdkMultiVpcStack extends cdk.Stack {
         transitGatewayId: tgw.ref
       }
     );
+    tgwRRinPrivateSubnetA.addDependsOn(tgwPgAppstream);
 
-    const tgwRRinPrivateSubnetC = new ec2.CfnRoute(
+    const tgwRR2inPrivateSubnetA = new ec2.CfnRoute(
+      this,
+      `${elemPrefix}-streamsubnetarr2`,
+      {
+        routeTableId: appStreamPrivateSubnetA.routeTable.routeTableId,
+        destinationCidrBlock: vpcSquid.vpcCidrBlock,
+        transitGatewayId: tgw.ref
+      }
+    );
+    tgwRR2inPrivateSubnetA.addDependsOn(tgwPgAppstream);
+
+    const tgwRR2inPrivateSubnetC = new ec2.CfnRoute(
       this,
       `${elemPrefix}-streamsubnetcrr`,
       {
         routeTableId: appStreamPrivateSubnetC.routeTable.routeTableId,
-        destinationCidrBlock: "0.0.0.0/0",
+        destinationCidrBlock: vpcSquid.vpcCidrBlock,
         transitGatewayId: tgw.ref
       }
     );
+    tgwRR2inPrivateSubnetC.addDependsOn(tgwPgAppstream);
+    
+    const tgwRRinSquidPrivateSubnetA = new ec2.CfnRoute(
+      this,
+      `${elemPrefix}-squidsubnetarr`,
+      {
+        routeTableId: vpcSquidPrivateSubnetA.routeTable.routeTableId,
+        destinationCidrBlock: vpcAppstream.vpcCidrBlock,
+        transitGatewayId: tgw.ref
+      }
+    );
+    tgwRRinSquidPrivateSubnetA.addDependsOn(tgwPgSquid);
+
+    const tgwRRinSquidPrivateSubnetC = new ec2.CfnRoute(
+      this,
+      `${elemPrefix}-squidsubnetcrr`,
+      {
+        routeTableId: vpcSquidPrivateSubnetC.routeTable.routeTableId,
+        destinationCidrBlock: vpcAppstream.vpcCidrBlock,
+        transitGatewayId: tgw.ref
+      }
+    );
+    tgwRRinSquidPrivateSubnetC.addDependsOn(tgwPgSquid);
+
+    const tgwRRinSquidPublicSubnetA = new ec2.CfnRoute(
+      this,
+      `${elemPrefix}-squidpublicsubnetarr`,
+      {
+        routeTableId: vpcSquidPublicSubnetA.routeTable.routeTableId,
+        destinationCidrBlock: vpcAppstream.vpcCidrBlock,
+        transitGatewayId: tgw.ref
+      }
+    );
+    tgwRRinSquidPublicSubnetA.addDependsOn(tgwPgSquid);
+
+    const tgwRRinSquidPublicSubnetC = new ec2.CfnRoute(
+      this,
+      `${elemPrefix}-squidpublicsubnetcrr`,
+      {
+        routeTableId: vpcSquidPublicSubnetC.routeTable.routeTableId,
+        destinationCidrBlock: vpcAppstream.vpcCidrBlock,
+        transitGatewayId: tgw.ref
+      }
+    );
+    tgwRRinSquidPublicSubnetC.addDependsOn(tgwPgSquid);
 
     // appstream configuration
     // CfnStack.AccessEndpointProperty.EndpointType : STREAMING
@@ -543,3 +623,7 @@ export class CdkMultiVpcStack extends cdk.Stack {
 
   }
 }
+
+
+
+
