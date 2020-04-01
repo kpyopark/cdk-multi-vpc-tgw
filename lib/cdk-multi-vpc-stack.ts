@@ -2,6 +2,9 @@ import * as cdk from '@aws-cdk/core';
 import ec2 = require('@aws-cdk/aws-ec2');
 import elbv2 = require('@aws-cdk/aws-elasticloadbalancingv2');
 import as = require('@aws-cdk/aws-appstream');
+import s3 = require('@aws-cdk/aws-s3');
+import iam = require('@aws-cdk/aws-iam');
+import s3deploy = require('@aws-cdk/aws-s3-deployment');
 
 import { truncate } from "fs";
 import { CfnRoute } from '@aws-cdk/aws-ec2';
@@ -31,6 +34,17 @@ export class CdkMultiVpcStack extends cdk.Stack {
     const vpcSquidPrivateSubnetCidr = ["10.254.80.0/24", "10.254.80.0/24"];
     const vpcSquidPublicSubnetCidr = ["10.254.0.0/24", "10.254.1.0/24"];
     const SquidInstPrivateIp = "10.254.0.157"
+
+    // Make s3 bucket for Squid Configurations. 
+    const squidConfigBucket = new s3.Bucket(this, `${elemPrefix}-bucket`, {
+      bucketName: `${elemPrefix}-bucket`,
+    });
+
+    // upload squid configuration file.
+    new s3deploy.BucketDeployment(this, 'DeployFiles', {
+      sources: [s3deploy.Source.asset('./resources')],
+      destinationBucket: squidConfigBucket,
+    });
     
     const vpcAppstream = new ec2.Vpc(this, `${elemPrefix}-vpc-appstream`, {
       cidr: vpcAppStreamCidr,
@@ -246,16 +260,22 @@ export class CdkMultiVpcStack extends cdk.Stack {
       date '+%Y-%m-%d %H:%M:%S'
       sudo yum update -y
       sudo yum install docker -y 
-      sudo groupadd docker
-      sudo usermod -a -G docker ec2-user
+      sudo su -c "if [ -z \\"\`sudo cat /etc/group | grep docker\`\\" ]; then groupadd docker; fi"
+      sudo usermod -a -G docker ec2-user | echo 1
       sudo chkconfig docker on
       sudo service docker start
       sudo docker pull sameersbn/squid:3.5.27-2
       # Docker process tends to bind ipv6 interface. It can make troubles. So we should use specific IPV4 address within docker publish port parameter like below.
-      sudo docker run --name squid -d --restart=always \\
-        --publish \`curl http://169.254.169.254/latest/meta-data/local-ipv4\`:3128:3128 \\
-        --volume /srv/docker/squid/cache:/var/spool/squid \\
-        sameersbn/squid:3.5.27-2
+      # below script replaced with squid-run.sh
+      #sudo docker run --name squid -d --restart=always \\
+      #  --publish \`curl http://169.254.169.254/latest/meta-data/local-ipv4\`:3128:3128 \\
+      #  --volume /srv/docker/squid/cache:/var/spool/squid \\
+      #  sameersbn/squid:3.5.27-2
+      sudo su -c "if [ -z \\"\`which aws\`\\" ]; then curl "https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip" -o "awscliv2.zip"; unzip awscliv2.zip; ./aws/install; fi"
+      aws s3 cp s3://${squidConfigBucket.bucketName}/squid.conf ~ec2-user/
+      aws s3 cp s3://${squidConfigBucket.bucketName}/whitelist.txt ~ec2-user/
+      aws s3 cp s3://${squidConfigBucket.bucketName}/squid-run.sh .
+      sudo su -c 'source ./squid-run.sh'
       echo END_USERSCRIPT
       `
     });
@@ -277,6 +297,11 @@ export class CdkMultiVpcStack extends cdk.Stack {
       },
       sourceDestCheck: false,
     });
+
+    squidInst.addToRolePolicy(new iam.PolicyStatement({
+      actions : ['s3:GetObject'],
+      resources : [squidConfigBucket.bucketArn + '/*']
+    }));
 
     const window2016Image = ec2.MachineImage.latestWindows(
       ec2.WindowsVersion.WINDOWS_SERVER_2016_KOREAN_FULL_BASE
